@@ -1,0 +1,307 @@
+// =============================================================================
+// Scalar Math Functions (Python math module replacement)
+// =============================================================================
+
+/// Square root: √x
+#[pyfunction]
+fn srt_sqrt(x: f64) -> f64 {
+    x.sqrt()
+}
+
+/// Exponential: e^x
+#[pyfunction]
+fn srt_exp(x: f64) -> f64 {
+    x.exp()
+}
+
+/// Natural logarithm: ln(x)
+#[pyfunction]
+fn srt_log(x: f64) -> f64 {
+    x.ln()
+}
+
+/// Logarithm base 10: log₁₀(x)
+#[pyfunction]
+fn srt_log10(x: f64) -> f64 {
+    x.log10()
+}
+
+/// Logarithm base 2: log₂(x)
+#[pyfunction]
+fn srt_log2(x: f64) -> f64 {
+    x.log2()
+}
+
+/// ln(1 + x) - numerically stable for small x
+#[pyfunction]
+fn srt_log1p(x: f64) -> f64 {
+    x.ln_1p()
+}
+
+/// e^x - 1 - numerically stable for small x
+#[pyfunction]
+fn srt_expm1(x: f64) -> f64 {
+    x.exp_m1()
+}
+
+/// Sine: sin(x)
+#[pyfunction]
+fn srt_sin(x: f64) -> f64 {
+    x.sin()
+}
+
+/// Cosine: cos(x)
+#[pyfunction]
+fn srt_cos(x: f64) -> f64 {
+    x.cos()
+}
+
+/// Tangent: tan(x)
+#[pyfunction]
+fn srt_tan(x: f64) -> f64 {
+    x.tan()
+}
+
+/// Arc sine: arcsin(x)
+#[pyfunction]
+fn srt_asin(x: f64) -> f64 {
+    x.asin()
+}
+
+/// Arc cosine: arccos(x)
+#[pyfunction]
+fn srt_acos(x: f64) -> f64 {
+    x.acos()
+}
+
+/// Arc tangent: arctan(x)
+#[pyfunction]
+fn srt_atan(x: f64) -> f64 {
+    x.atan()
+}
+
+/// Arc tangent of y/x, handling quadrants: atan2(y, x)
+#[pyfunction]
+fn srt_atan2(y: f64, x: f64) -> f64 {
+    y.atan2(x)
+}
+
+/// Hyperbolic sine: sinh(x)
+#[pyfunction]
+fn srt_sinh(x: f64) -> f64 {
+    x.sinh()
+}
+
+/// Hyperbolic cosine: cosh(x)
+#[pyfunction]
+fn srt_cosh(x: f64) -> f64 {
+    x.cosh()
+}
+
+/// Hyperbolic tangent: tanh(x)
+#[pyfunction]
+fn srt_tanh(x: f64) -> f64 {
+    x.tanh()
+}
+
+/// Inverse hyperbolic sine: asinh(x)
+#[pyfunction]
+fn srt_asinh(x: f64) -> f64 {
+    x.asinh()
+}
+
+/// Inverse hyperbolic cosine: acosh(x)
+#[pyfunction]
+fn srt_acosh(x: f64) -> f64 {
+    x.acosh()
+}
+
+/// Inverse hyperbolic tangent: atanh(x)
+#[pyfunction]
+fn srt_atanh(x: f64) -> f64 {
+    x.atanh()
+}
+
+/// Power: x^y
+#[pyfunction]
+fn srt_pow(x: f64, y: f64) -> f64 {
+    x.powf(y)
+}
+
+/// Power with integer exponent: x^n (faster)
+#[pyfunction]
+fn srt_powi(x: f64, n: i32) -> f64 {
+    x.powi(n)
+}
+
+/// Floor: ⌊x⌋
+#[pyfunction]
+fn srt_floor(x: f64) -> f64 {
+    x.floor()
+}
+
+/// Ceiling: ⌈x⌉
+#[pyfunction]
+fn srt_ceil(x: f64) -> f64 {
+    x.ceil()
+}
+
+/// Round to nearest integer
+#[pyfunction]
+fn srt_round(x: f64) -> f64 {
+    x.round()
+}
+
+/// Truncate toward zero
+#[pyfunction]
+fn srt_trunc(x: f64) -> f64 {
+    x.trunc()
+}
+
+/// Fractional part: x - ⌊x⌋
+#[pyfunction]
+fn srt_fract(x: f64) -> f64 {
+    x.fract()
+}
+
+/// Absolute value: |x|
+#[pyfunction]
+fn srt_abs(x: f64) -> f64 {
+    x.abs()
+}
+
+/// Sign of x: -1, 0, or 1
+#[pyfunction]
+fn srt_signum(x: f64) -> f64 {
+    x.signum()
+}
+
+/// Copy sign: magnitude of x with sign of y
+#[pyfunction]
+fn srt_copysign(x: f64, y: f64) -> f64 {
+    x.copysign(y)
+}
+
+/// Fused multiply-add: x * y + z (single rounding)
+#[pyfunction]
+fn srt_fma(x: f64, y: f64, z: f64) -> f64 {
+    x.mul_add(y, z)
+}
+
+/// Euclidean distance: √(x² + y²) (avoiding overflow)
+#[pyfunction]
+fn srt_hypot(x: f64, y: f64) -> f64 {
+    x.hypot(y)
+}
+
+/// Cube root: ∛x
+#[pyfunction]
+fn srt_cbrt(x: f64) -> f64 {
+    x.cbrt()
+}
+
+/// Minimum of two values
+#[pyfunction]
+fn srt_min(x: f64, y: f64) -> f64 {
+    x.min(y)
+}
+
+/// Maximum of two values
+#[pyfunction]
+fn srt_max(x: f64, y: f64) -> f64 {
+    x.max(y)
+}
+
+/// Clamp x to [lo, hi]
+#[pyfunction]
+fn srt_clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    x.clamp(lo, hi)
+}
+
+/// Convert radians to degrees
+#[pyfunction]
+fn srt_degrees(x: f64) -> f64 {
+    x.to_degrees()
+}
+
+/// Convert degrees to radians
+#[pyfunction]
+fn srt_radians(x: f64) -> f64 {
+    x.to_radians()
+}
+
+/// Check if x is NaN
+#[pyfunction]
+fn srt_isnan(x: f64) -> bool {
+    x.is_nan()
+}
+
+/// Check if x is infinite
+#[pyfunction]
+fn srt_isinf(x: f64) -> bool {
+    x.is_infinite()
+}
+
+/// Check if x is finite
+#[pyfunction]
+fn srt_isfinite(x: f64) -> bool {
+    x.is_finite()
+}
+
+/// Linear interpolation: a + t * (b - a)
+#[pyfunction]
+fn srt_lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + t * (b - a)
+}
+
+/// Golden lerp: a * (1 - φ⁻¹) + b * φ⁻¹
+#[pyfunction]
+fn srt_golden_lerp(a: f64, b: f64) -> f64 {
+    let phi_inv = srt_kernels::PHI_INV;
+    a * (1.0 - phi_inv) + b * phi_inv
+}
+
+/// Golden exponential: φ^x
+#[pyfunction]
+fn srt_phi_power(x: f64) -> f64 {
+    srt_kernels::PHI.powf(x)
+}
+
+/// Inverse golden exponential: φ^(-x)
+#[pyfunction]
+fn srt_phi_power_inv(x: f64) -> f64 {
+    srt_kernels::PHI.powf(-x)
+}
+
+// =============================================================================
+// Integer Math Functions
+// =============================================================================
+
+/// Greatest common divisor
+#[pyfunction]
+fn srt_gcd(a: i64, b: i64) -> i64 {
+    fn gcd_inner(a: i64, b: i64) -> i64 {
+        if b == 0 { a.abs() } else { gcd_inner(b, a % b) }
+    }
+    gcd_inner(a, b)
+}
+
+/// Least common multiple
+#[pyfunction]
+fn srt_lcm(a: i64, b: i64) -> i64 {
+    if a == 0 || b == 0 { 0 } else { (a / srt_gcd(a, b) * b).abs() }
+}
+
+/// Factorial: n!
+#[pyfunction]
+fn srt_factorial(n: u32) -> u64 {
+    (1..=n as u64).product()
+}
+
+/// Binomial coefficient: C(n, k)
+#[pyfunction]
+fn srt_comb(n: u64, k: u64) -> u64 {
+    if k > n { return 0; }
+    let k = k.min(n - k);
+    (0..k).fold(1u64, |acc, i| acc * (n - i) / (i + 1))
+}

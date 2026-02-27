@@ -1,0 +1,55 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "syntonic"
+version = "0.2.0"
+description = "Tensor library for Cosmological and Syntony Recursion Theory"
+requires-python = ">=3.10"
+license = {text = "Dual License - See LICENSE.md"}
+authors = [{name = "Andrew Orth"}]
+keywords = ["tensor", "physics", "CRT", "SRT", "syntony", "recursion"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "hypothesis>=6.0",
+    "black",
+    "ruff",
+    "mypy",
+    ]
+docs = [
+    "sphinx>=6.0",
+    "myst-parser",
+    "sphinx-rtd-theme",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module", "cuda"]
+module-name = "syntonic._core"
+manifest-path = "rust/Cargo.toml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=syntonic"
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I", "N", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true

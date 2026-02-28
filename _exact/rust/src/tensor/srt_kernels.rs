@@ -1429,6 +1429,23 @@ extern "C" {
         n: i32,
         k: i32,
     ) -> i32;
+
+    // Phase-State Compiler Operations (int8 exact-integer pipeline)
+    fn host_phase_state_run_2d(
+        m4: *mut i8,
+        t4: *mut i8,
+        is_source: *const i8,
+        stale_cycles: *mut i32,
+        recursive_depth: *mut i32,
+        rows: i32,
+        cols: i32,
+        stale_threshold: i32,
+        k_threshold: i32,
+        allow_novelty: i32,
+        max_cycles: i32,
+        out_gnosis: *mut i32,
+        out_cycles_used: *mut i32,
+    ) -> i32;
 }
 
 // ============================================================================
@@ -1922,6 +1939,69 @@ pub fn static_matmul_f64(c: &mut [f64], a: &[f64], b: &[f64], m: i32, n: i32, k:
         return Err(format!("CUDA kernel failed with code {}", result));
     }
     Ok(())
+}
+
+/// Run the Phase-State compile cycle loop on GPU.
+///
+/// All data stays in VRAM between cycles. Returns (gnosis_reached, cycles_used).
+///
+/// # Arguments
+/// * `m4` - Mutable i8 slice for real components (-1, 0, 1)
+/// * `t4` - Mutable i8 slice for imaginary components (-1, 0, 1)
+/// * `is_source` - Immutable i8 slice marking source nodes
+/// * `stale_cycles` - Mutable i32 slice for per-node staleness
+/// * `recursive_depth` - Mutable i32 slice for per-node recursion depth
+/// * `rows`, `cols` - Grid dimensions (n = rows * cols)
+/// * `stale_threshold` - Cycles before recursion triggers
+/// * `k_threshold` - Kissing number for gnosis (typically 24)
+/// * `allow_novelty` - Enable majority-vote novelty injection
+/// * `max_cycles` - Maximum compile cycles
+#[cfg(feature = "cuda")]
+pub fn static_phase_state_run_2d(
+    m4: &mut [i8],
+    t4: &mut [i8],
+    is_source: &[i8],
+    stale_cycles: &mut [i32],
+    recursive_depth: &mut [i32],
+    rows: i32,
+    cols: i32,
+    stale_threshold: i32,
+    k_threshold: i32,
+    allow_novelty: bool,
+    max_cycles: i32,
+) -> Result<(bool, i32), String> {
+    let n = (rows * cols) as usize;
+    if m4.len() != n || t4.len() != n || is_source.len() != n
+        || stale_cycles.len() != n || recursive_depth.len() != n
+    {
+        return Err(format!(
+            "All arrays must have length {} (rows={} * cols={})",
+            n, rows, cols
+        ));
+    }
+    let mut gnosis_out: i32 = 0;
+    let mut cycles_used: i32 = 0;
+    let result = unsafe {
+        host_phase_state_run_2d(
+            m4.as_mut_ptr(),
+            t4.as_mut_ptr(),
+            is_source.as_ptr(),
+            stale_cycles.as_mut_ptr(),
+            recursive_depth.as_mut_ptr(),
+            rows,
+            cols,
+            stale_threshold,
+            k_threshold,
+            if allow_novelty { 1 } else { 0 },
+            max_cycles,
+            &mut gnosis_out,
+            &mut cycles_used,
+        )
+    };
+    if result != 0 {
+        return Err(format!("CUDA phase-state kernel failed with code {}", result));
+    }
+    Ok((gnosis_out != 0, cycles_used))
 }
 
 /// Validate that listed SRT kernels are present in the PTX modules for a device.

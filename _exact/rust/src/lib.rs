@@ -832,6 +832,78 @@ fn py_generate_resonance_ladder(max_h: i64) -> PyResult<Vec<(i64, i64, i64)>> {
 /// - The five fundamental SRT constants (π, e, φ, E*, q)
 /// - Tensor storage (legacy, uses floats - to be replaced)
 /// - Hypercomplex numbers (Quaternion, Octonion)
+/// Run the Phase-State compile cycle loop on GPU using int8 exact-integer CUDA kernels.
+///
+/// All data stays in VRAM between cycles. Returns a dict with:
+///   m4, t4: final node states (lists of int)
+///   stale_cycles, recursive_depth: updated per-node counters
+///   gnosis: bool - whether K-threshold gnosis was reached
+///   cycles_used: int - number of compile cycles executed
+///
+/// Args:
+///   m4: list of int (-1, 0, 1) - real components
+///   t4: list of int (-1, 0, 1) - imaginary components
+///   is_source: list of int (0 or 1) - source node flags
+///   stale_cycles: list of int - per-node staleness counters
+///   recursive_depth: list of int - per-node recursion depth
+///   rows, cols: grid dimensions
+///   stale_threshold: cycles before recursion triggers
+///   k_threshold: kissing number for gnosis (default 24)
+///   allow_novelty: enable majority-vote novelty injection
+///   max_cycles: maximum compile cycles
+#[cfg(feature = "cuda")]
+#[pyfunction]
+#[pyo3(signature = (m4, t4, is_source, stale_cycles, recursive_depth, rows, cols, stale_threshold=3, k_threshold=24, allow_novelty=true, max_cycles=100))]
+fn ps_run_2d(
+    m4: Vec<i32>,
+    t4: Vec<i32>,
+    is_source: Vec<i32>,
+    stale_cycles: Vec<i32>,
+    recursive_depth: Vec<i32>,
+    rows: i32,
+    cols: i32,
+    stale_threshold: i32,
+    k_threshold: i32,
+    allow_novelty: bool,
+    max_cycles: i32,
+) -> PyResult<(Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>, bool, i32)> {
+    let n = (rows * cols) as usize;
+    if m4.len() != n || t4.len() != n || is_source.len() != n
+        || stale_cycles.len() != n || recursive_depth.len() != n
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("All arrays must have length {} ({}x{})", n, rows, cols)
+        ));
+    }
+
+    // Convert i32 -> i8 for m4/t4/is_source (GPU kernel uses int8_t)
+    let mut m4_i8: Vec<i8> = m4.iter().map(|&v| v as i8).collect();
+    let mut t4_i8: Vec<i8> = t4.iter().map(|&v| v as i8).collect();
+    let is_source_i8: Vec<i8> = is_source.iter().map(|&v| v as i8).collect();
+    let mut stale_i32 = stale_cycles;
+    let mut depth_i32 = recursive_depth;
+
+    let (gnosis, cycles_used) = tensor::srt_kernels::static_phase_state_run_2d(
+        &mut m4_i8,
+        &mut t4_i8,
+        &is_source_i8,
+        &mut stale_i32,
+        &mut depth_i32,
+        rows,
+        cols,
+        stale_threshold,
+        k_threshold,
+        allow_novelty,
+        max_cycles,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    // Convert i8 back to i32 for Python
+    let m4_out: Vec<i32> = m4_i8.iter().map(|&v| v as i32).collect();
+    let t4_out: Vec<i32> = t4_i8.iter().map(|&v| v as i32).collect();
+
+    Ok((m4_out, t4_out, stale_i32, depth_i32, gnosis, cycles_used))
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Validate hierarchy correction functions are callable from Rust
@@ -1152,6 +1224,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(srt_kernels::validate_kernels, m)?)?;
+
+    // Phase-State Compiler GPU acceleration
+    #[cfg(feature = "cuda")]
+    m.add_function(wrap_pyfunction!(ps_run_2d, m)?)?;
+
     // Kernel loaders (direct function calls from py_srt_cuda_ops module)
     {
         use tensor::py_srt_cuda_ops::{

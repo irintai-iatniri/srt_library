@@ -60,6 +60,7 @@ fn main() {
         "complex_ops.cu",
         "host_wrappers.cu",
         "nn_ops.cu",  // NN operations: silu, where, pixel_shuffle, upsample, GRU/LSTM gates
+        "phase_state_ops.cu",  // Phase-State compiler: int8 harmonize, wavefront, novelty, recursion
     ];
 
     // Compile each source file to object files

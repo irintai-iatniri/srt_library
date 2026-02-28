@@ -616,4 +616,170 @@ int host_matmul_f64(double *c, const double *a, const double *b, int m, int n,
   return 0;
 }
 
+// =============================================================================
+// Phase-State Compiler Operations (int8 exact-integer CUDA pipeline)
+// =============================================================================
+
+// Forward declarations from phase_state_ops.cu
+extern "C" __global__ void ps_inject_novelty_2d_kernel(
+    int8_t* m4, int8_t* t4, int* interacted,
+    int rows, int cols, int* activity_flag);
+
+extern "C" __global__ void ps_wavefront_propagate_kernel(
+    int8_t* m4, int8_t* t4, int* interacted,
+    int rows, int cols);
+
+extern "C" __global__ void ps_harmonize_kernel(
+    int8_t* m4, int8_t* t4, int* interacted,
+    const int8_t* is_source, int n);
+
+extern "C" __global__ void ps_dampened_recursion_kernel(
+    int8_t* m4, int8_t* t4, int* interacted,
+    const int8_t* is_source, int* stale_cycles, int* recursive_depth,
+    int stale_threshold, int k_threshold, int* gnosis_flag,
+    int n);
+
+/**
+ * host_phase_state_run_2d
+ *
+ * Runs the full Phase-State compile cycle loop on GPU.
+ * Data stays in VRAM between cycles — only copied back at the end.
+ *
+ * Parameters (all host pointers):
+ *   m4, t4:            int8_t arrays of size n (real/imag components)
+ *   is_source:         int8_t array of size n (1 = source node)
+ *   stale_cycles:      int32 array of size n (per-node staleness)
+ *   recursive_depth:   int32 array of size n (per-node recursion depth)
+ *   rows, cols:        grid dimensions (n = rows * cols)
+ *   stale_threshold:   cycles before recursion triggers
+ *   k_threshold:       K=24 kissing number for gnosis
+ *   allow_novelty:     1 = enable novelty injection, 0 = disable
+ *   max_cycles:        maximum number of compile cycles
+ *   out_gnosis:        output: 1 if gnosis reached, 0 otherwise
+ *   out_cycles_used:   output: number of cycles actually run
+ *
+ * Returns 0 on success, -1 on CUDA error.
+ */
+int host_phase_state_run_2d(
+    int8_t* m4, int8_t* t4,
+    const int8_t* is_source,
+    int* stale_cycles, int* recursive_depth,
+    int rows, int cols,
+    int stale_threshold, int k_threshold,
+    int allow_novelty, int max_cycles,
+    int* out_gnosis, int* out_cycles_used
+) {
+    int n = rows * cols;
+    int block = 256;
+    int grd = grid_size(n, block);
+
+    /* Device buffers */
+    int8_t *d_m4 = NULL, *d_t4 = NULL, *d_is_source = NULL;
+    int *d_interacted = NULL, *d_stale = NULL, *d_depth = NULL;
+    int *d_gnosis_flag = NULL, *d_activity_flag = NULL;
+
+    /* Allocate */
+    CUDA_CHECK(cudaMalloc((void**)&d_m4, sizeof(int8_t) * n));
+    CUDA_CHECK(cudaMalloc((void**)&d_t4, sizeof(int8_t) * n));
+    CUDA_CHECK(cudaMalloc((void**)&d_is_source, sizeof(int8_t) * n));
+    CUDA_CHECK(cudaMalloc((void**)&d_interacted, sizeof(int) * n));
+    CUDA_CHECK(cudaMalloc((void**)&d_stale, sizeof(int) * n));
+    CUDA_CHECK(cudaMalloc((void**)&d_depth, sizeof(int) * n));
+    CUDA_CHECK(cudaMalloc((void**)&d_gnosis_flag, sizeof(int)));
+    CUDA_CHECK(cudaMalloc((void**)&d_activity_flag, sizeof(int)));
+
+    /* Copy H2D */
+    CUDA_CHECK(cudaMemcpy(d_m4, m4, sizeof(int8_t) * n, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_t4, t4, sizeof(int8_t) * n, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_is_source, is_source, sizeof(int8_t) * n, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_stale, stale_cycles, sizeof(int) * n, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_depth, recursive_depth, sizeof(int) * n, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(d_gnosis_flag, 0, sizeof(int)));
+
+    int gnosis_host = 0;
+    int cycle;
+
+    for (cycle = 0; cycle < max_cycles; cycle++) {
+        /* Reset per-cycle state */
+        CUDA_CHECK(cudaMemset(d_interacted, 0, sizeof(int) * n));
+        CUDA_CHECK(cudaMemset(d_activity_flag, 0, sizeof(int)));
+
+        /* 1. Novelty injection (if enabled) */
+        if (allow_novelty) {
+            ps_inject_novelty_2d_kernel<<<grd, block>>>(
+                d_m4, d_t4, d_interacted, rows, cols, d_activity_flag);
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+
+        /* 2. Wavefront propagation */
+        ps_wavefront_propagate_kernel<<<grd, block>>>(
+            d_m4, d_t4, d_interacted, rows, cols);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        /* 3. Global harmonization */
+        ps_harmonize_kernel<<<grd, block>>>(
+            d_m4, d_t4, d_interacted, d_is_source, n);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        /* 4. Dampened recursion */
+        ps_dampened_recursion_kernel<<<grd, block>>>(
+            d_m4, d_t4, d_interacted, d_is_source,
+            d_stale, d_depth,
+            stale_threshold, k_threshold, d_gnosis_flag, n);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        /* Check gnosis flag */
+        CUDA_CHECK(cudaMemcpy(&gnosis_host, d_gnosis_flag, sizeof(int),
+                              cudaMemcpyDeviceToHost));
+        if (gnosis_host == 1) {
+            cycle++;
+            break;
+        }
+
+        /* Quick syntony check: copy m4 back and see if all zeros */
+        /* (Only check every 4 cycles to reduce PCI-e traffic) */
+        if ((cycle + 1) % 4 == 0 || cycle == max_cycles - 1) {
+            CUDA_CHECK(cudaMemcpy(m4, d_m4, sizeof(int8_t) * n,
+                                  cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(t4, d_t4, sizeof(int8_t) * n,
+                                  cudaMemcpyDeviceToHost));
+            int all_syntonic = 1;
+            for (int i = 0; i < n; i++) {
+                if (m4[i] != 0 || t4[i] != 0) {
+                    all_syntonic = 0;
+                    break;
+                }
+            }
+            if (all_syntonic) {
+                cycle++;
+                break;
+            }
+        }
+    }
+
+    /* Copy final state D2H */
+    CUDA_CHECK(cudaMemcpy(m4, d_m4, sizeof(int8_t) * n, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(t4, d_t4, sizeof(int8_t) * n, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(stale_cycles, d_stale, sizeof(int) * n, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(recursive_depth, d_depth, sizeof(int) * n, cudaMemcpyDeviceToHost));
+
+    /* Free device memory */
+    CUDA_CHECK(cudaFree(d_m4));
+    CUDA_CHECK(cudaFree(d_t4));
+    CUDA_CHECK(cudaFree(d_is_source));
+    CUDA_CHECK(cudaFree(d_interacted));
+    CUDA_CHECK(cudaFree(d_stale));
+    CUDA_CHECK(cudaFree(d_depth));
+    CUDA_CHECK(cudaFree(d_gnosis_flag));
+    CUDA_CHECK(cudaFree(d_activity_flag));
+
+    *out_gnosis = gnosis_host;
+    *out_cycles_used = cycle;
+    return 0;
+}
+
 } // extern "C"

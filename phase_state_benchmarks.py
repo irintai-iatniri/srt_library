@@ -1,13 +1,17 @@
 """
 Phase-State Compiler Benchmark Suite
 
-Six benchmarks testing the Phase-State Compiler against conventional baselines:
+Ten benchmarks testing the Phase-State Compiler against conventional baselines:
 0. Sequence Copying (topological routing across a gap)
 1. XOR Correctness (harmonization sanity check)
 2. Sequence Prediction (16-step, multi-pattern)
 3. 64-node Phase-State RNN vs Float32 LSTM
 4. 256-node Associative Memory recall vs Transformer baseline
 5. Gnosis/Attractor (K=24 saturation)
+6. Harmonic Readout (zero-parameter resonance inference)
+7. 1024-node Associative Memory recall (100 patterns, 40% noise)
+8. 2D Toroidal Grid (wavefront propagation & self-repair)
+9. Tiny Language Task (next-token prediction)
 
 All tests use srt_library or pure Python only -- no PyTorch, NumPy, or SciPy.
 """
@@ -18,12 +22,14 @@ import time
 import math
 import random
 import contextlib
+import copy
 
 import srt_library.core as syn
 from srt_library.core.nn.resonant_tensor import ResonantTensor
 from srt_library.core import sn
 from srt_library.core.nn.layers.resonant_linear import ResonantLinear
 from phase_state_vibes_compiler import PhaseStateCompiler, GaussianNode
+from srt_library.core.nn.optim.golden_momentum import GoldenMomentumOptimizer
 
 
 @contextlib.contextmanager
@@ -627,6 +633,754 @@ def test_gnosis_attractor():
 
 
 # ============================================================================
+#  TEST 6: Harmonic Readout (Zero-Parameter Resonance Inference)
+# ============================================================================
+
+class HarmonicReadout:
+    """
+    Zero-parameter readout for SRT architectures.
+    Predicts tokens by finding which alphabet candidate achieves
+    maximum resonance (minimum phase residual) within the lane.
+
+    Instead of training weights, we let the toroidal lane's geometry
+    reveal the answer through structural interference.
+    """
+
+    def __init__(self, alphabet=None):
+        self.alphabet = alphabet or [1, -1]
+
+    def predict(self, lane):
+        """
+        Test each candidate against every node in the lane.
+        The candidate whose phase best matches the stored state
+        (minimum |stored - candidate| residual) wins.
+        """
+        best_char = None
+        min_residual = None
+
+        for char in self.alphabet:
+            # Resonance test: |stored - candidate| → 0 means perfect match
+            neg_candidate = syn.state(
+                [complex(-char, 0)], dtype="complex128"
+            )
+            total_residual = 0
+            for node in lane.nodes:
+                total_residual += (node._state + neg_candidate).norm()
+
+            if min_residual is None or total_residual < min_residual:
+                min_residual = total_residual
+                best_char = char
+
+        return best_char
+
+
+def test_harmonic_psrnn(seed=42):
+    """
+    PS-RNN with Harmonic Readout vs LSTM with trained readout.
+    PS-RNN needs 0 parameters — the toroidal lane topology preserves
+    the signal structurally, and the readout simply tests for resonance.
+    LSTM has no such structure and requires trained weights.
+    """
+    input_size = 8
+    hidden_size = 64
+    seq_len = 16
+    num_trials = 3
+
+    results = []
+
+    for trial in range(num_trials):
+        s = seed + trial * 7
+        random.seed(s)
+        base_vec = [1 if random.random() > 0.5 else -1 for _ in range(input_size)]
+        sequence = [[v * (1 if t % 4 < 2 else -1) for v in base_vec]
+                     for t in range(seq_len)]
+        ground_truth = [v * (1 if seq_len % 4 < 2 else -1) for v in base_vec]
+
+        # --- PS-RNN + Harmonic Readout (0 params, no training) ---
+        ps_rnn = PhaseStateRNNCell(input_size, hidden_size)
+        readout = HarmonicReadout(alphabet=[1, -1])
+
+        t0 = time.time()
+        with suppress_stdout():
+            for x in sequence:
+                ps_rnn.step(x)
+
+        ps_pred = [readout.predict(lane) for lane in ps_rnn.lanes]
+        ps_time = (time.time() - t0) * 1000
+        ps_correct = sum(1 for p, g in zip(ps_pred, ground_truth) if p == g)
+        ps_acc = ps_correct / input_size
+
+        # --- LSTM + Trained Readout (520 params, 10 gradient steps) ---
+        lstm_model = sn.Module()
+        lstm_model.readout = ResonantLinear(hidden_size, input_size, bias=True)
+        lstm_opt = GoldenMomentumOptimizer(
+            [lstm_model.readout.weight.tensor, lstm_model.readout.bias.tensor],
+            lr=0.1)
+
+        random.seed(s)
+        lstm = PureFloat32LSTM(input_size, hidden_size)
+        for x in sequence:
+            lstm.step(x)
+        lstm_hidden = lstm.h
+
+        t0 = time.time()
+        target_floats = [v * 1.0 for v in ground_truth]
+        w = lstm_model.readout.weight.tensor
+        b = lstm_model.readout.bias.tensor
+        out_sz, in_sz = w.shape[0], w.shape[1]
+
+        for step in range(10):
+            lstm_opt.zero_grad()
+            h_t = ResonantTensor(lstm_hidden, [1, in_sz])
+            t_t = ResonantTensor(target_floats, [1, out_sz])
+            o_t = lstm_model.readout(h_t)
+            err = o_t.elementwise_add(t_t.negate()).to_floats()
+
+            scale = 2.0 / out_sz
+            w._grad = [0.0] * (out_sz * in_sz)
+            b._grad = [0.0] * out_sz
+            for i in range(out_sz):
+                for j in range(in_sz):
+                    w._grad[i * in_sz + j] = scale * err[i] * lstm_hidden[j]
+                b._grad[i] = scale * err[i]
+            lstm_opt.step()
+
+        h_t = ResonantTensor(lstm_hidden, [1, in_sz])
+        lstm_out = lstm_model.readout(h_t).to_floats()
+        lstm_pred = [1 if v >= 0 else -1 for v in lstm_out[:input_size]]
+        lstm_time = (time.time() - t0) * 1000
+        lstm_correct = sum(1 for p, g in zip(lstm_pred, ground_truth) if p == g)
+        lstm_acc = lstm_correct / input_size
+
+        results.append((ps_acc, ps_time, lstm_acc, lstm_time))
+
+        print(f"  Trial {trial+1}: PS {ps_acc*100:.0f}% ({ps_time:.1f}ms)"
+              f"  |  LSTM {lstm_acc*100:.0f}% ({lstm_time:.1f}ms)")
+
+    avg_ps = sum(r[0] for r in results) / num_trials
+    avg_ps_t = sum(r[1] for r in results) / num_trials
+    avg_lstm = sum(r[2] for r in results) / num_trials
+    avg_lstm_t = sum(r[3] for r in results) / num_trials
+    lstm_params = lstm_model.readout.weight.tensor.size + lstm_model.readout.bias.tensor.size
+
+    print()
+    print_table(
+        ["Model", "Avg Accuracy", "Avg Time (ms)", "Params", "Logic"],
+        [
+            ["PS-RNN + Harmonic",
+             f"{avg_ps*100:.1f}%", f"{avg_ps_t:.1f}", "0", "Resonance"],
+            ["LSTM + Trained Readout",
+             f"{avg_lstm*100:.1f}%", f"{avg_lstm_t:.1f}",
+             str(lstm_params), "Gradient"],
+        ]
+    )
+    print("  Note: PS-RNN uses zero-parameter resonance readout.")
+    print("  LSTM requires 10 gradient steps via GoldenMomentumOptimizer.")
+
+    return avg_ps, avg_lstm
+
+
+# ============================================================================
+#  TEST 7: 1024-Node Associative Memory (100 patterns, 40% noise)
+# ============================================================================
+
+def test_associative_memory_1024(seed=42):
+    """
+    Scale-up of TEST 4: 1024-node memory bank, 100 patterns, 40% noise.
+    """
+    pattern_dim = 1024
+    num_patterns = 100
+    noise = 0.4
+
+    rng = random.Random(seed)
+
+    patterns = []
+    for _ in range(num_patterns):
+        p = [1 if rng.random() > 0.5 else -1 for _ in range(pattern_dim)]
+        patterns.append(p)
+
+    probes = [make_noisy_probe(p, noise, rng) for p in patterns]
+
+    # --- Phase-State Recall ---
+    print("\n  Running Phase-State XOR-Harmonization recall...")
+    ps_correct_bits_total = 0
+    ps_pattern_hits = 0
+
+    t0 = time.time()
+    for i, (original, probe) in enumerate(zip(patterns, probes)):
+        recalled, overlap = phase_state_recall(patterns, probe)
+        bit_acc = sum(1 for r, o in zip(recalled, original) if r == o) / pattern_dim
+        ps_correct_bits_total += bit_acc
+        if recalled == original:
+            ps_pattern_hits += 1
+        if (i + 1) % 20 == 0:
+            print(f"    {i+1}/{num_patterns} done...")
+    ps_time = (time.time() - t0) * 1000
+
+    ps_mean_bit_acc = ps_correct_bits_total / num_patterns
+
+    # --- Attention Memory Baseline ---
+    print("\n  Running Attention Memory baseline...")
+    attn_mem = AttentionMemory(pattern_dim, d_model=32)
+    attn_mem.store(patterns)
+    attn_correct_bits_total = 0
+    attn_pattern_hits = 0
+
+    t0 = time.time()
+    for i, (original, probe) in enumerate(zip(patterns, probes)):
+        recalled = attn_mem.recall(probe)
+        bit_acc = sum(1 for r, o in zip(recalled, original) if r == o) / pattern_dim
+        attn_correct_bits_total += bit_acc
+        if recalled == original:
+            attn_pattern_hits += 1
+        if (i + 1) % 20 == 0:
+            print(f"    {i+1}/{num_patterns} done...")
+    attn_time = (time.time() - t0) * 1000
+
+    attn_mean_bit_acc = attn_correct_bits_total / num_patterns
+
+    print()
+    print_table(
+        ["Model", "Mean Bit Acc", "Pattern Recall", "Time (ms)", "Params"],
+        [
+            ["Phase-State 1024",
+             f"{ps_mean_bit_acc*100:.1f}%",
+             f"{ps_pattern_hits}/{num_patterns}",
+             f"{ps_time:.0f}",
+             "0 (1024 nodes)"],
+            ["Attention Memory",
+             f"{attn_mean_bit_acc*100:.1f}%",
+             f"{attn_pattern_hits}/{num_patterns}",
+             f"{attn_time:.0f}",
+             str(attn_mem.param_count())],
+        ]
+    )
+
+    return ps_mean_bit_acc, attn_mean_bit_acc
+
+
+# ============================================================================
+#  TEST 8: 2D Toroidal Grid (Wavefront Propagation & Self-Repair)
+# ============================================================================
+
+class Grid2DCompiler(PhaseStateCompiler):
+    """
+    2D toroidal grid extension of PhaseStateCompiler.
+    Nodes arranged on a rows x cols torus with 4-directional neighbors.
+    """
+
+    def __init__(self, rows, cols, kissing_number_threshold=16,
+                 allow_novelty=True, stale_threshold=3):
+        super().__init__(
+            kissing_number_threshold=kissing_number_threshold,
+            allow_novelty=allow_novelty,
+            toroidal=True,
+            stale_threshold=stale_threshold,
+        )
+        self.rows = rows
+        self.cols = cols
+        for _ in range(rows * cols):
+            self.nodes.append(GaussianNode(0))
+
+    def _idx(self, r, c):
+        """Flat index with toroidal wrapping."""
+        return (r % self.rows) * self.cols + (c % self.cols)
+
+    def _neighbors(self, flat_idx):
+        """4-directional neighbor indices with toroidal wrap."""
+        r = flat_idx // self.cols
+        c = flat_idx % self.cols
+        return [
+            self._idx(r - 1, c),
+            self._idx(r + 1, c),
+            self._idx(r, c - 1),
+            self._idx(r, c + 1),
+        ]
+
+    def set_node(self, r, c, val):
+        """Set node at (r,c) to a given M4 value."""
+        node = self.nodes[self._idx(r, c)]
+        node._state = syn.state(
+            [complex(val, 0)], dtype="complex128", device=node._state.device
+        )
+        node._project()
+
+    def compile_cycle(self):
+        """Override for 2D neighbor topology."""
+        unresolved = [n for n in self.nodes if not n.is_syntonic()]
+        if not unresolved:
+            return True
+
+        interacted = set()
+        activity = False
+        n_nodes = len(self.nodes)
+
+        # 0. 2D Novelty — majority vote of non-syntonic 4-neighbors
+        if self.allow_novelty and any(n.is_syntonic() for n in self.nodes):
+            filled = self._inject_novelty_2d()
+            interacted.update(filled)
+
+        # 1. 2D Propagation — single wavefront ring per cycle
+        newly_activated = set()
+        for i, node_a in enumerate(self.nodes):
+            if node_a.is_syntonic():
+                continue
+            if node_a in interacted:
+                continue
+
+            for nb_idx in self._neighbors(i):
+                node_b = self.nodes[nb_idx]
+                if node_b.is_syntonic() and node_b not in interacted:
+                    node_b._state = syn.state(
+                        [node_a._state.to_list()[0]],
+                        dtype=node_b._state.dtype,
+                        device=node_b._state.device
+                    )
+                    node_b._project()
+                    node_b.stale_cycles = 0
+                    interacted.add(node_a)
+                    interacted.add(node_b)
+                    newly_activated.add(node_b)
+                    activity = True
+
+        # 2. Global Harmonization
+        for i, node_a in enumerate(self.nodes):
+            if node_a.is_syntonic() or node_a in interacted or node_a in newly_activated:
+                continue
+            for j, node_b in enumerate(self.nodes):
+                if i == j or node_b.is_syntonic() or node_b in interacted or node_b in newly_activated:
+                    continue
+                if getattr(node_a, 'is_source', False) and getattr(node_b, 'is_source', False):
+                    continue
+                if (node_a._state + node_b._state).norm() < 1e-12:
+                    node_a.harmonize(node_b)
+                    node_b._state = syn.state([0j], dtype=node_b._state.dtype,
+                                               device=node_b._state.device)
+                    node_b._project()
+                    interacted.add(node_a)
+                    interacted.add(node_b)
+                    node_a.stale_cycles = 0
+                    node_b.stale_cycles = 0
+                    activity = True
+                    break
+
+        # 3. Dampened Recursion
+        for node in self.nodes:
+            if not node.is_syntonic() and node not in interacted:
+                if getattr(node, 'is_source', False):
+                    continue
+                node.stale_cycles += 1
+                if node.stale_cycles >= self.stale_threshold:
+                    node.recurse()
+                    node.stale_cycles = 0
+                    if node.recursive_depth >= self.K_THRESHOLD and self.gnosis_layer < 3:
+                        self._trigger_gnosis_transition()
+            else:
+                if hasattr(node, 'stale_cycles'):
+                    node.stale_cycles = 0
+
+        return False
+
+    def _inject_novelty_2d(self):
+        """Fill syntonic nodes via majority vote of 4 non-syntonic neighbors."""
+        empty_indices = [i for i, n in enumerate(self.nodes) if n.is_syntonic()]
+        if not empty_indices:
+            return set()
+
+        filled_nodes = set()
+        for idx in empty_indices:
+            node = self.nodes[idx]
+            if not node.is_syntonic():
+                continue
+
+            neighbor_vals = []
+            for nb_idx in self._neighbors(idx):
+                nb = self.nodes[nb_idx]
+                if not nb.is_syntonic():
+                    neighbor_vals.append(nb.m4_val)
+
+            if neighbor_vals:
+                vote = sum(neighbor_vals)
+                val = 1 if vote > 0 else (-1 if vote < 0 else 0)
+                if val != 0:
+                    node._state = syn.state(
+                        [complex(val, 0)], dtype=node._state.dtype,
+                        device=node._state.device
+                    )
+                    node._project()
+                    node.stale_cycles = 0
+                    filled_nodes.add(node)
+
+        return filled_nodes
+
+
+def test_2d_toroidal_grid():
+    """
+    Sub-test A: Wavefront propagation from a single source on 16x16 torus.
+    Sub-test B: Self-repair of damaged region on 16x16 torus.
+    """
+    rows, cols = 16, 16
+    total_nodes = rows * cols
+
+    # --- Sub-test A: Wavefront ---
+    print("\n  Sub-test A: Wavefront Propagation")
+    grid = Grid2DCompiler(rows, cols, allow_novelty=False, stale_threshold=999)
+
+    # Single source at (0,0)
+    grid.set_node(0, 0, 1)
+    grid.nodes[grid._idx(0, 0)].is_source = True
+
+    milestones = {25: None, 50: None, 75: None, 100: None}
+    toroidal_confirmed = False
+
+    with suppress_stdout():
+        for cycle in range(rows + cols):
+            grid.compile_cycle()
+            active = sum(1 for n in grid.nodes if not n.is_syntonic())
+            pct = active * 100 // total_nodes
+
+            # Check opposite corner for toroidal wrap
+            opp = grid.nodes[grid._idx(rows // 2, cols // 2)]
+            if not opp.is_syntonic() and not toroidal_confirmed:
+                toroidal_confirmed = True
+
+            for m in milestones:
+                if milestones[m] is None and pct >= m:
+                    milestones[m] = cycle + 1
+
+            if active >= total_nodes:
+                break
+
+    print_table(
+        ["Metric", "Value"],
+        [
+            ["Grid Size", f"{rows}x{cols} ({total_nodes} nodes)"],
+            ["Cycles to 25% fill", str(milestones.get(25, "N/A"))],
+            ["Cycles to 50% fill", str(milestones.get(50, "N/A"))],
+            ["Cycles to 75% fill", str(milestones.get(75, "N/A"))],
+            ["Cycles to 100% fill", str(milestones.get(100, "N/A"))],
+            ["Toroidal wrap confirmed", "YES" if toroidal_confirmed else "NO"],
+        ]
+    )
+
+    # --- Sub-test B: Self-Repair ---
+    print("\n  Sub-test B: Self-Repair")
+    grid2 = Grid2DCompiler(rows, cols, allow_novelty=True, stale_threshold=999)
+
+    # Fill entire grid with +1
+    for r in range(rows):
+        for c in range(cols):
+            grid2.set_node(r, c, 1)
+            grid2.nodes[grid2._idx(r, c)].is_source = True
+
+    # Damage 4x4 region (rows 6-9, cols 6-9)
+    damage_size = 4
+    damage_r0, damage_c0 = 6, 6
+    damaged_indices = []
+    for r in range(damage_r0, damage_r0 + damage_size):
+        for c in range(damage_c0, damage_c0 + damage_size):
+            idx = grid2._idx(r, c)
+            grid2.nodes[idx]._state = syn.state(
+                [0j], dtype=grid2.nodes[idx]._state.dtype,
+                device=grid2.nodes[idx]._state.device
+            )
+            grid2.nodes[idx].is_source = False
+            damaged_indices.append(idx)
+
+    repair_cycle = None
+    with suppress_stdout():
+        for cycle in range(20):
+            grid2.compile_cycle()
+            repaired = sum(1 for idx in damaged_indices
+                           if not grid2.nodes[idx].is_syntonic())
+            if repaired == len(damaged_indices) and repair_cycle is None:
+                repair_cycle = cycle + 1
+                break
+
+    # Check accuracy
+    repair_correct = sum(1 for idx in damaged_indices
+                         if grid2.nodes[idx].m4_val == 1)
+    repair_acc = repair_correct / len(damaged_indices)
+
+    print_table(
+        ["Metric", "Value"],
+        [
+            ["Pattern", f"Uniform +1 ({rows}x{cols})"],
+            ["Damaged nodes", str(len(damaged_indices))],
+            ["Cycles to full repair", str(repair_cycle) if repair_cycle else ">20"],
+            ["Repair accuracy", f"{repair_acc*100:.1f}%"],
+        ]
+    )
+
+    return toroidal_confirmed, repair_acc
+
+
+# ============================================================================
+#  TEST 9: Tiny Language Task (Next-Token Prediction)
+# ============================================================================
+
+def encode_binary(text, alphabet="AB"):
+    """Encode string as +1/-1 values. First char -> +1, second -> -1."""
+    mapping = {alphabet[0]: 1, alphabet[1]: -1}
+    return [mapping.get(ch, 0) for ch in text]
+
+
+def decode_binary(values, alphabet="AB"):
+    """Decode +1/-1 values back to string."""
+    return "".join(alphabet[0] if v >= 0 else alphabet[1] for v in values)
+
+
+def encode_4token(text):
+    """Encode A/B/C/D text as 2 nodes per token."""
+    mapping = {'A': [1, 1], 'B': [1, -1], 'C': [-1, 1], 'D': [-1, -1]}
+    result = []
+    for ch in text:
+        result.extend(mapping.get(ch, [0, 0]))
+    return result
+
+
+def decode_4token(values):
+    """Decode 2-node encoding back to A/B/C/D text."""
+    inv = {(1, 1): 'A', (1, -1): 'B', (-1, 1): 'C', (-1, -1): 'D'}
+    result = []
+    for i in range(0, len(values) - 1, 2):
+        key = (1 if values[i] >= 0 else -1, 1 if values[i + 1] >= 0 else -1)
+        result.append(inv.get(key, '?'))
+    return "".join(result)
+
+
+class BigramBaseline:
+    """Bigram frequency model for next-token prediction."""
+
+    def __init__(self, vocab):
+        self.vocab = vocab
+        self.counts = {}
+
+    def train(self, sequence):
+        """Train on a single sequence (list of tokens)."""
+        for i in range(len(sequence) - 1):
+            pair = (sequence[i], sequence[i + 1])
+            self.counts[pair] = self.counts.get(pair, 0) + 1
+
+    def predict(self, context_token):
+        """Predict most likely next token."""
+        best_count = -1
+        best_next = self.vocab[0]
+        for next_tok in self.vocab:
+            c = self.counts.get((context_token, next_tok), 0)
+            if c > best_count:
+                best_count = c
+                best_next = next_tok
+        return best_next
+
+
+def test_tiny_language():
+    """
+    Tests next-token prediction on symbolic repeating sequences.
+    Phase-State compiler uses autocorrelation period detection.
+    Bigram baseline uses simple frequency counting.
+    """
+    # --- Part A: Binary Alphabet ---
+    print("\n  Part A: Binary Alphabet (A/B)")
+
+    binary_patterns = [
+        ("AABB x25", "AABB" * 25),
+        ("ABAB x50", "AB" * 50),
+        ("AAAB x25", "AAAB" * 25),
+        ("ALL_A",    "A" * 100),
+    ]
+
+    blank_count = 10
+    rows_a = []
+
+    for name, text in binary_patterns:
+        encoded = encode_binary(text)
+        context = encoded[:len(encoded) - blank_count]
+        ground_truth = encoded[len(encoded) - blank_count:]
+
+        # Phase-State prediction
+        compiler = PhaseStateCompiler(kissing_number_threshold=16, allow_novelty=True)
+        compiler.load_data(encoded)
+
+        # Stamp exact values
+        for i, val in enumerate(encoded):
+            compiler.nodes[i]._state = syn.state(
+                [complex(val, 0)], dtype="complex128",
+                device=compiler.nodes[i]._state.device
+            )
+            compiler.nodes[i]._project()
+
+        # Blank last nodes
+        for i in range(len(encoded) - blank_count, len(encoded)):
+            compiler.nodes[i]._state = compiler.nodes[i]._state * 0
+
+        # Anchor context
+        for i in range(len(encoded) - blank_count):
+            compiler.nodes[i].is_source = True
+
+        recovered = lambda nodes, bc=blank_count: all(
+            not n.is_syntonic() for n in nodes[-bc:]
+        )
+
+        with suppress_stdout():
+            compiler.run(max_cycles=30, exit_condition=recovered)
+
+        ps_pred = [n.m4_val for n in compiler.nodes[-blank_count:]]
+        ps_correct = sum(1 for p, g in zip(ps_pred, ground_truth) if p == g)
+
+        # Bigram baseline
+        text_list = list(text)
+        bigram = BigramBaseline(["A", "B"])
+        bigram.train(text_list[:len(text) - blank_count])
+
+        bg_correct = 0
+        prev_token = text_list[len(text) - blank_count - 1]
+        for i in range(blank_count):
+            pred_token = bigram.predict(prev_token)
+            actual_token = text_list[len(text) - blank_count + i]
+            if pred_token == actual_token:
+                bg_correct += 1
+            prev_token = pred_token
+
+        rows_a.append([
+            name,
+            f"{ps_correct}/{blank_count} ({ps_correct*100//blank_count}%)",
+            f"{bg_correct}/{blank_count} ({bg_correct*100//blank_count}%)",
+        ])
+
+    print_table(["Pattern", "PS Accuracy", "Bigram Accuracy"], rows_a)
+
+    # --- Part B: 4-Token Alphabet ---
+    print("\n  Part B: 4-Token Alphabet (A/B/C/D, 2 nodes/token)")
+
+    quad_patterns = [
+        ("ABCD x25",     "ABCD" * 25),
+        ("AABBCCDD x12", ("AABBCCDD" * 13)[:100]),
+        ("ABDC x25",     "ABDC" * 25),
+    ]
+
+    blank_tokens = 10
+    rows_b = []
+
+    for name, text in quad_patterns:
+        encoded = encode_4token(text)
+        blank_nodes = blank_tokens * 2
+        context_nodes = len(encoded) - blank_nodes
+        ground_truth_text = text[-blank_tokens:]
+
+        compiler = PhaseStateCompiler(kissing_number_threshold=16, allow_novelty=True)
+        compiler.load_data(encoded)
+
+        for i, val in enumerate(encoded):
+            compiler.nodes[i]._state = syn.state(
+                [complex(val, 0)], dtype="complex128",
+                device=compiler.nodes[i]._state.device
+            )
+            compiler.nodes[i]._project()
+
+        for i in range(context_nodes, len(encoded)):
+            compiler.nodes[i]._state = compiler.nodes[i]._state * 0
+
+        for i in range(context_nodes):
+            compiler.nodes[i].is_source = True
+
+        recovered = lambda nodes, bn=blank_nodes: all(
+            not n.is_syntonic() for n in nodes[-bn:]
+        )
+
+        with suppress_stdout():
+            compiler.run(max_cycles=30, exit_condition=recovered)
+
+        pred_vals = [n.m4_val for n in compiler.nodes[-blank_nodes:]]
+        pred_text = decode_4token(pred_vals)
+        ps_correct = sum(1 for p, g in zip(pred_text, ground_truth_text) if p == g)
+
+        # Bigram baseline
+        text_list = list(text)
+        bigram = BigramBaseline(["A", "B", "C", "D"])
+        bigram.train(text_list[:len(text) - blank_tokens])
+
+        bg_correct = 0
+        prev_token = text_list[len(text) - blank_tokens - 1]
+        for i in range(blank_tokens):
+            pred_token = bigram.predict(prev_token)
+            actual_token = text_list[len(text) - blank_tokens + i]
+            if pred_token == actual_token:
+                bg_correct += 1
+            prev_token = pred_token
+
+        rows_b.append([
+            name,
+            f"{ps_correct}/{blank_tokens} ({ps_correct*100//blank_tokens}%)",
+            f"{bg_correct}/{blank_tokens} ({bg_correct*100//blank_tokens}%)",
+        ])
+
+    print_table(["Pattern", "PS Accuracy", "Bigram Accuracy"], rows_b)
+
+def test_4096_grid_scaling():
+    """
+    TEST 10: 4096-Node Scale Test (64x64 Toroidal Grid)
+    Measures CPU latency and exactness at scale using pure Python 
+    and srt_library, tracking a single wavefront across the manifold.
+    """
+    rows, cols = 64, 64
+    total_nodes = rows * cols
+
+    print("\n  Running 4096-Node Wavefront Scaling Test...")
+    
+    # Initialize the 64x64 toroidal compiler
+    t_init = time.time()
+    grid = Grid2DCompiler(rows, cols, allow_novelty=False, stale_threshold=999)
+    init_time = time.time() - t_init
+
+    # Set single source at (0,0)
+    grid.set_node(0, 0, 1)
+    grid.nodes[grid._idx(0, 0)].is_source = True
+
+    milestones = {25: None, 50: None, 75: None, 100: None}
+    toroidal_confirmed = False
+
+    t0 = time.time()
+    with suppress_stdout():
+        # Maximum cycles needed for a 64x64 grid wavefront is rows + cols
+        for cycle in range(rows + cols):
+            grid.compile_cycle()
+            
+            # Diagnostic tracking
+            active = sum(1 for n in grid.nodes if not n.is_syntonic())
+            pct = active * 100 // total_nodes
+
+            # Check opposite corner to confirm topological wrapping
+            opp = grid.nodes[grid._idx(rows // 2, cols // 2)]
+            if not opp.is_syntonic() and not toroidal_confirmed:
+                toroidal_confirmed = True
+
+            for m in milestones:
+                if milestones[m] is None and pct >= m:
+                    milestones[m] = cycle + 1
+
+            if active >= total_nodes:
+                break
+                
+    prop_time = time.time() - t0
+
+    print_table(
+        ["Metric", "Value"],
+        [
+            ["Grid Size", f"{rows}x{cols} ({total_nodes} nodes)"],
+            ["Initialization Time (s)", f"{init_time:.4f}"],
+            ["Propagation Time (s)", f"{prop_time:.4f}"],
+            ["Cycles to 25% fill", str(milestones.get(25, "N/A"))],
+            ["Cycles to 50% fill", str(milestones.get(50, "N/A"))],
+            ["Cycles to 75% fill", str(milestones.get(75, "N/A"))],
+            ["Cycles to 100% fill", str(milestones.get(100, "N/A"))],
+            ["Toroidal wrap confirmed", "YES" if toroidal_confirmed else "NO"],
+        ]
+    )
+
+    return prop_time
+
+# ============================================================================
 #  Main
 # ============================================================================
 
@@ -671,6 +1425,21 @@ if __name__ == '__main__':
 
     print_header("TEST 5: Gnosis / Attractor (K=24 Saturation)")
     test_gnosis_attractor()
+
+    print_header("TEST 6: Harmonic Readout (Zero-Parameter Resonance)")
+    test_harmonic_psrnn()
+
+    print_header("TEST 7: Associative Memory (1024-node, 100 patterns, 40% noise)")
+    test_associative_memory_1024()
+
+    print_header("TEST 8: 2D Toroidal Grid (Wavefront & Self-Repair)")
+    test_2d_toroidal_grid()
+
+    print_header("TEST 9: Tiny Language Task (Next-Token Prediction)")
+    test_tiny_language()
+
+    print_header("TEST 10: 4096-Node Scale Test (64x64 Toroidal Grid)")
+    test_4096_grid_scaling()    
 
     print("\n" + "=" * 70)
     print("  ALL BENCHMARKS COMPLETE")

@@ -95,7 +95,7 @@ class PhaseStateCompiler:
     achieves Syntony (0) or undergoes a Gnosis phase transition.
     """
     def __init__(self, kissing_number_threshold=K_D4, allow_novelty=True,
-                 toroidal=False, stale_threshold=3):
+                 toroidal=False, stale_threshold=3, use_gpu=None):
         self.nodes = []
         self.gnosis_layer = 0
         self.K_THRESHOLD = kissing_number_threshold
@@ -165,27 +165,31 @@ class PhaseStateCompiler:
                                 activity_occurred = True
 
         # 2. Attempt Harmonization (Global Resonance Matching)
-        for i, node_a in enumerate(self.nodes):
-            if node_a.is_syntonic() or node_a in interacted_this_cycle or node_a in newly_activated:
-                continue
-
-            for j, node_b in enumerate(self.nodes):
-                if i == j or node_b.is_syntonic() or node_b in interacted_this_cycle or node_b in newly_activated:
+        if self.use_gpu:
+            harm_activity = self._harmonize_gpu_dispatch(interacted_this_cycle, newly_activated)
+            activity_occurred = activity_occurred or harm_activity
+        else:
+            for i, node_a in enumerate(self.nodes):
+                if node_a.is_syntonic() or node_a in interacted_this_cycle or node_a in newly_activated:
                     continue
 
-                if getattr(node_a, 'is_source', False) and getattr(node_b, 'is_source', False):
-                    continue
+                for j, node_b in enumerate(self.nodes):
+                    if i == j or node_b.is_syntonic() or node_b in interacted_this_cycle or node_b in newly_activated:
+                        continue
 
-                if (node_a._state + node_b._state).norm() < 1e-12:
-                    node_a.harmonize(node_b)
-                    node_b._state = syn.state([0j], dtype=node_b._state.dtype, device=node_b._state.device)
-                    node_b._project()
-                    interacted_this_cycle.add(node_a)
-                    interacted_this_cycle.add(node_b)
-                    node_a.stale_cycles = 0
-                    node_b.stale_cycles = 0
-                    activity_occurred = True
-                    break
+                    if getattr(node_a, 'is_source', False) and getattr(node_b, 'is_source', False):
+                        continue
+
+                    if (node_a._state + node_b._state).norm() < 1e-12:
+                        node_a.harmonize(node_b)
+                        node_b._state = syn.state([0j], dtype=node_b._state.dtype, device=node_b._state.device)
+                        node_b._project()
+                        interacted_this_cycle.add(node_a)
+                        interacted_this_cycle.add(node_b)
+                        node_a.stale_cycles = 0
+                        node_b.stale_cycles = 0
+                        activity_occurred = True
+                        break
 
         # 3. Dampened Recursion — only rotate nodes that have been stuck
         for node in self.nodes:
@@ -260,7 +264,7 @@ class PhaseStateCompiler:
             for j in range(idx - 1, -1, -1):
                 if not self.nodes[j].is_syntonic():
                     history.append(self.nodes[j].m4_val)
-                if len(history) >= 16:
+                if len(history) >= 64:
                     break
             history.reverse()
 

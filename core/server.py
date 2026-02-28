@@ -1,10 +1,13 @@
 import asyncio
 import json
+import math
 import threading
 import time
 
-import numpy as np
-import websockets
+try:
+    import websockets
+except ImportError:
+    websockets = None
 
 # Global state buffer (Thread-safe)
 LATEST_STATE = {
@@ -82,18 +85,14 @@ def update_monitor(model, syntony, temp, phase):
     global LATEST_STATE
 
     # Extract raw weights from the model (CPU copy)
-    # Support both PyTorch (detach().cpu()) and Pure Syntonic (to_list())
     flat_weights = []
 
-    # Allow models that expose either `parameters()` (torch-like) OR
-    # `get_weights()` (pure syntonic models returning ResonantTensors).
     sources = None
     if hasattr(model, "parameters"):
         sources = model.parameters()
     elif hasattr(model, "get_weights"):
         sources = model.get_weights()
     else:
-        # Nothing we can introspect
         return
 
     for p in sources:
@@ -102,46 +101,36 @@ def update_monitor(model, syntony, temp, phase):
         # Handle Pure Syntonic Parameter objects / ResonantTensor
         if hasattr(p, "to_list"):
             try:
-                w_data = np.array(p.to_list())
+                w_data = list(p.to_list())
             except Exception:
                 pass
 
-        # Handle objects with `.tensor.to_floats()` access
         if w_data is None and hasattr(p, "tensor") and hasattr(p.tensor, "to_floats"):
             try:
-                w_data = np.array(p.tensor.to_floats())
+                w_data = list(p.tensor.to_floats())
             except Exception:
                 pass
 
-        # Handle PyTorch Tensor-like objects
-        if w_data is None and hasattr(p, "detach"):
-            try:
-                w_data = p.detach().cpu().numpy().flatten()
-            except Exception:
-                pass
+        if w_data is not None and len(w_data) > 0:
+            flat_weights.extend(w_data)
 
-        if w_data is not None and w_data.size > 0:
-            flat_weights.append(w_data)
-
-        # Limit the size to avoid heavy serialization
-        current_len = sum(len(w) for w in flat_weights)
-        if current_len > 6144:  # 2048 * 3
+        if len(flat_weights) > 6144:
             break
 
     if not flat_weights:
         return
 
-    full_vector = np.concatenate(flat_weights)
-    if len(full_vector) > 6144:
-        full_vector = full_vector[:6144]  # Limit to 2048 * 3
+    full_vector = flat_weights[:6144]
 
     # Normalize for visualization (-50 to 50 range)
-    if full_vector.std() > 0:
-        full_vector = (
-            (full_vector - full_vector.mean()) / (full_vector.std() + 1e-6) * 25.0
-        )
+    n = len(full_vector)
+    if n > 0:
+        mean = sum(full_vector) / n
+        var = sum((v - mean) ** 2 for v in full_vector) / n
+        std = math.sqrt(var) if var > 0 else 0.0
+        if std > 0:
+            full_vector = [(v - mean) / (std + 1e-6) * 25.0 for v in full_vector]
 
-    # Debug log to help verify monitor updates server-side
     try:
         print(
             f">>> VIZ: pushing {len(full_vector)} weights, syntony={syntony:.4f}, temp={temp:.4f}, phase={phase}"
@@ -150,7 +139,7 @@ def update_monitor(model, syntony, temp, phase):
         pass
 
     LATEST_STATE = {
-        "weights": full_vector.tolist(),
+        "weights": full_vector,
         "syntony": float(syntony),
         "temperature": float(temp),
         "phase": "D" if phase > 0.5 else "H",

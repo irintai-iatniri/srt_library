@@ -5,6 +5,7 @@ Syntonic Pixel Operations — Pure reshape/interpolation layers.
 - Upsample: Nearest neighbor or bilinear upsampling
 
 These are pure geometric operations with no learned parameters.
+Uses Rust _core backend when available.
 
 Source: CRT.md §12.2
 """
@@ -15,6 +16,13 @@ from typing import List, Optional
 
 from srt_library.core import sn
 from srt_library.core.nn.resonant_tensor import ResonantTensor
+
+# Try to import Rust backend
+try:
+    from srt_library.core._core import py_pixel_shuffle as _rs_pixel_shuffle, py_upsample as _rs_upsample
+    _HAS_RUST_PIXEL = True
+except ImportError:
+    _HAS_RUST_PIXEL = False
 
 
 class PixelShuffle(sn.Module):
@@ -49,6 +57,13 @@ class PixelShuffle(sn.Module):
         c = c_total // (r * r)
         assert c * r * r == c_total, f"Channels {c_total} not divisible by r²={r*r}"
 
+        # Try Rust backend
+        if _HAS_RUST_PIXEL:
+            result_data, result_shape = _rs_pixel_shuffle(x.to_floats(), [batch, h, w, c_total], r)
+            out_shape = list(result_shape)[1:] if squeeze else list(result_shape)
+            return ResonantTensor(result_data, out_shape, device=x.device)
+
+        # Python fallback
         data = x.to_floats()
         out_h, out_w = h * r, w * r
         output = [0.0] * (batch * out_h * out_w * c)
@@ -59,7 +74,6 @@ class PixelShuffle(sn.Module):
                     for oc in range(c):
                         for rh in range(r):
                             for rw in range(r):
-                                # Input channel index
                                 ic = oc * r * r + rh * r + rw
                                 in_idx = b * (h * w * c_total) + ih * (w * c_total) + iw * c_total + ic
 
@@ -106,6 +120,14 @@ class Upsample(sn.Module):
             batch, h, w, c = shape
 
         r = self.scale_factor
+
+        # Try Rust backend
+        if _HAS_RUST_PIXEL:
+            result_data, result_shape = _rs_upsample(x.to_floats(), [batch, h, w, c], r, self.mode)
+            out_shape = list(result_shape)[1:] if squeeze else list(result_shape)
+            return ResonantTensor(result_data, out_shape, device=x.device)
+
+        # Python fallback
         out_h, out_w = h * r, w * r
         data = x.to_floats()
 

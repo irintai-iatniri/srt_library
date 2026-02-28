@@ -185,6 +185,11 @@ use resonant::py_wrappers::{
     py_upsample,
     py_gru_cell,
     py_lstm_cell,
+    py_conv1d,
+    py_conv_transpose2d,
+    py_embedding_lookup,
+    py_upsample_nearest,
+    py_upsample_bilinear,
 };
 
 // Trilinear operations (CUDA)
@@ -1340,6 +1345,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_upsample, m)?)?;
     m.add_function(wrap_pyfunction!(py_gru_cell, m)?)?;
     m.add_function(wrap_pyfunction!(py_lstm_cell, m)?)?;
+    m.add_function(wrap_pyfunction!(py_conv1d, m)?)?;
+    m.add_function(wrap_pyfunction!(py_conv_transpose2d, m)?)?;
+    m.add_function(wrap_pyfunction!(py_embedding_lookup, m)?)?;
+    m.add_function(wrap_pyfunction!(py_upsample_nearest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_upsample_bilinear, m)?)?;
 
     // === Trilinear Operations ===
     m.add_function(wrap_pyfunction!(py_trilinear_f64, m)?)?;

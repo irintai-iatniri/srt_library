@@ -391,6 +391,28 @@ class Tanh(Module):
         return x.tanh(self.precision)
 
 
+class SiLU(Module):
+    """SiLU (Swish) activation: x * sigmoid(x).
+
+    Self-gating aligns with syntonic self-reference in SRT theory.
+    Uses Rust backend when available.
+    """
+
+    def forward(self, x: ResonantTensor) -> ResonantTensor:
+        try:
+            from srt_library.core._core import py_silu
+            data = py_silu(x.to_floats())
+            return ResonantTensor(data, list(x.shape))
+        except ImportError:
+            import math
+            data = x.to_floats()
+            result = []
+            for v in data:
+                sig = 1.0 / (1.0 + math.exp(-max(-500.0, min(500.0, v))))
+                result.append(v * sig)
+            return ResonantTensor(result, list(x.shape))
+
+
 def compute_spatial_mode_norms(shape: List[int]) -> List[float]:
     """
     Compute spatial mode norms for data tensors (NOT for parameters).

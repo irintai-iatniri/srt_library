@@ -5,6 +5,8 @@ Gates use SyntonicGate (adaptive D̂/Ĥ mixing) instead of plain sigmoid.
 Hidden state is treated as a resonant state with syntony tracking.
 Forget bias initialized to golden ratio for stable long-term memory.
 
+Uses Rust _core backend for cell computation when available.
+
 Includes:
 - SyntonicGRU: GRU with syntonic gating
 - SyntonicLSTM: LSTM with resonant cell state
@@ -22,6 +24,13 @@ from srt_library.core.nn.resonant_tensor import ResonantTensor
 
 PHI = (1 + math.sqrt(5)) / 2
 PHI_INV = 1 / PHI
+
+# Try to import Rust backend for cell ops
+try:
+    from srt_library.core._core import py_gru_cell as _rs_gru_cell, py_lstm_cell as _rs_lstm_cell
+    _HAS_RUST_RNN = True
+except ImportError:
+    _HAS_RUST_RNN = False
 
 
 class SyntonicGRUCell(sn.Module):
@@ -78,12 +87,25 @@ class SyntonicGRUCell(sn.Module):
         if is_1d:
             x = x.view([1, self.input_size])
 
+        batch = x.shape[0]
         if h is None:
-            batch = x.shape[0]
             h = ResonantTensor([0.0] * (batch * self.hidden_size), [batch, self.hidden_size], device=self.device)
         elif len(h.shape) == 1:
             h = h.view([1, self.hidden_size])
 
+        # Try Rust backend
+        if _HAS_RUST_RNN:
+            h_new_data = _rs_gru_cell(
+                x.to_floats(), h.to_floats(),
+                self.w_ir.to_list(), self.w_hr.to_list(), self.b_r.to_list(),
+                self.w_iz.to_list(), self.w_hz.to_list(), self.b_z.to_list(),
+                self.w_in.to_list(), self.w_hn.to_list(), self.b_n.to_list(),
+                batch, self.input_size, self.hidden_size,
+            )
+            shape = [self.hidden_size] if is_1d else [batch, self.hidden_size]
+            return ResonantTensor(h_new_data, shape, device=self.device)
+
+        # Python fallback
         # Reset gate: r = σ(W_ir @ x + W_hr @ h + b_r)
         r = x.matmul(self.w_ir.tensor)
         r_h = h.matmul(self.w_hr.tensor)
@@ -107,7 +129,6 @@ class SyntonicGRUCell(sn.Module):
         n.tanh()
 
         # New hidden: h' = (1 - z) * n + z * h
-        # Syntonic version: mix via φ-weighted interpolation
         ones_data = [1.0] * (z.shape[0] * z.shape[1])
         ones = ResonantTensor(ones_data, z.shape, device=self.device)
         one_minus_z = ones + z.scalar_mul(-1.0)
@@ -136,6 +157,8 @@ class SyntonicGRU(sn.Module):
 
     Processes a sequence and returns all hidden states
     plus the final hidden state.
+
+    Supports batch_first=True for (batch, seq_len, input_size) input.
     """
 
     def __init__(
@@ -143,12 +166,16 @@ class SyntonicGRU(sn.Module):
         input_size: int,
         hidden_size: int,
         num_layers: int = 1,
+        batch_first: bool = False,
+        dropout: float = 0.0,
         device: str = "cpu",
     ):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.batch_first = batch_first
+        self.dropout = dropout
         self.device = device
 
         self.cells = sn.ModuleList()
@@ -163,22 +190,64 @@ class SyntonicGRU(sn.Module):
         Process sequence through GRU.
 
         Args:
-            x: Input (seq_len, input_size)
-            h0: Initial hidden state (num_layers, hidden_size)
+            x: Input (seq_len, input_size) or (batch, seq_len, input_size) if batch_first
+            h0: Initial hidden state (num_layers, hidden_size) or (num_layers, batch, hidden_size)
 
         Returns:
-            (output, h_n): output is (seq_len, hidden_size), h_n is final hidden
+            (output, h_n): output shape matches input convention, h_n is final hidden
         """
-        seq_len = x.shape[0]
-        all_outputs = []
+        # Handle batch_first: (batch, seq, feat) → process per-batch
+        if self.batch_first and len(x.shape) == 3:
+            batch_size, seq_len, feat_size = x.shape
+            x_data = x.to_floats()
 
-        # Process through layers
+            all_batch_outputs = []
+            all_batch_h = []
+
+            for b in range(batch_size):
+                # Extract this batch's sequence: (seq_len, feat_size)
+                b_start = b * seq_len * feat_size
+                b_data = x_data[b_start:b_start + seq_len * feat_size]
+                b_tensor = ResonantTensor(b_data, [seq_len, feat_size], device=self.device)
+
+                b_h0 = None
+                if h0 is not None:
+                    h0_data = h0.to_floats()
+                    if len(h0.shape) == 3:
+                        # (num_layers, batch, hidden) → extract batch b
+                        b_h_data = []
+                        for layer in range(self.num_layers):
+                            offset = layer * batch_size * self.hidden_size + b * self.hidden_size
+                            b_h_data.extend(h0_data[offset:offset + self.hidden_size])
+                        b_h0 = ResonantTensor(b_h_data, [self.num_layers, self.hidden_size], device=self.device)
+                    else:
+                        b_h0 = h0
+
+                b_out, b_h = self._forward_seq(b_tensor, b_h0)
+                all_batch_outputs.extend(b_out.to_floats())
+                all_batch_h.append(b_h.to_floats())
+
+            output = ResonantTensor(all_batch_outputs, [batch_size, seq_len, self.hidden_size], device=self.device)
+            # Stack final hidden states
+            h_data = []
+            for bh in all_batch_h:
+                h_data.extend(bh)
+            h_n = ResonantTensor(h_data, [batch_size, self.hidden_size], device=self.device)
+            return output, h_n
+
+        # Non-batch or 2D input
+        return self._forward_seq(x, h0)
+
+    def _forward_seq(
+        self, x: ResonantTensor, h0: Optional[ResonantTensor] = None
+    ) -> Tuple[ResonantTensor, ResonantTensor]:
+        """Process a single sequence (seq_len, input_size)."""
+        seq_len = x.shape[0]
         layer_input_data = x.to_floats()
 
         for layer_idx, cell in enumerate(self.cells):
             h = None
             if h0 is not None:
-                # Extract layer's initial hidden state
                 start = layer_idx * self.hidden_size
                 end = start + self.hidden_size
                 h_data = h0.to_floats()[start:end]
@@ -196,16 +265,12 @@ class SyntonicGRU(sn.Module):
                 h = cell(x_t, h)
                 layer_outputs.append(h.to_floats())
 
-            # Prepare input for next layer
             layer_input_data = []
             for out in layer_outputs:
                 layer_input_data.extend(out)
 
-        # Build output tensor
         output_data = layer_input_data
         output = ResonantTensor(output_data, [seq_len, self.hidden_size], device=self.device)
-
-        # Final hidden state
         h_n = ResonantTensor(layer_outputs[-1], [self.hidden_size], device=self.device)
 
         return output, h_n
@@ -283,6 +348,23 @@ class SyntonicLSTMCell(sn.Module):
                 h = h.view([1, self.hidden_size])
                 c = c.view([1, self.hidden_size])
 
+        # Try Rust backend
+        if _HAS_RUST_RNN:
+            h_new_data, c_new_data = _rs_lstm_cell(
+                x.to_floats(), h.to_floats(), c.to_floats(),
+                self.w_ii.to_list(), self.w_hi.to_list(), self.b_i.to_list(),
+                self.w_if.to_list(), self.w_hf.to_list(), self.b_f.to_list(),
+                self.w_ig.to_list(), self.w_hg.to_list(), self.b_g.to_list(),
+                self.w_io.to_list(), self.w_ho.to_list(), self.b_o.to_list(),
+                batch, self.input_size, self.hidden_size,
+            )
+            shape = [self.hidden_size] if is_1d else [batch, self.hidden_size]
+            return (
+                ResonantTensor(h_new_data, shape, device=self.device),
+                ResonantTensor(c_new_data, shape, device=self.device),
+            )
+
+        # Python fallback
         # Input gate: i = σ(W_ii @ x + W_hi @ h + b_i)
         i_gate = x.matmul(self.w_ii.tensor) + h.matmul(self.w_hi.tensor)
         i_gate = self._add_bias(i_gate, self.b_i.to_list())
@@ -333,6 +415,8 @@ class SyntonicLSTM(sn.Module):
 
     The cell state maintains syntonic coherence across the sequence,
     acting as the Ĥ operator for temporal harmonization.
+
+    Supports batch_first=True for (batch, seq_len, input_size) input.
     """
 
     def __init__(
@@ -340,12 +424,16 @@ class SyntonicLSTM(sn.Module):
         input_size: int,
         hidden_size: int,
         num_layers: int = 1,
+        batch_first: bool = False,
+        dropout: float = 0.0,
         device: str = "cpu",
     ):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.batch_first = batch_first
+        self.dropout = dropout
         self.device = device
 
         self.cells = sn.ModuleList()
@@ -362,12 +450,68 @@ class SyntonicLSTM(sn.Module):
         Process sequence through LSTM.
 
         Args:
-            x: Input (seq_len, input_size)
-            state: (h0, c0) initial states, each (num_layers, hidden_size)
+            x: Input (seq_len, input_size) or (batch, seq_len, input_size) if batch_first
+            state: (h0, c0) initial states
 
         Returns:
             (output, (h_n, c_n))
         """
+        # Handle batch_first: (batch, seq, feat) → process per-batch
+        if self.batch_first and len(x.shape) == 3:
+            batch_size, seq_len, feat_size = x.shape
+            x_data = x.to_floats()
+
+            all_batch_outputs = []
+            all_batch_h = []
+            all_batch_c = []
+
+            for b in range(batch_size):
+                b_start = b * seq_len * feat_size
+                b_data = x_data[b_start:b_start + seq_len * feat_size]
+                b_tensor = ResonantTensor(b_data, [seq_len, feat_size], device=self.device)
+
+                b_state = None
+                if state is not None:
+                    h0, c0 = state
+                    h0_data = h0.to_floats()
+                    c0_data = c0.to_floats()
+                    if len(h0.shape) == 3:
+                        b_h_data = []
+                        b_c_data = []
+                        for layer in range(self.num_layers):
+                            h_offset = layer * batch_size * self.hidden_size + b * self.hidden_size
+                            b_h_data.extend(h0_data[h_offset:h_offset + self.hidden_size])
+                            b_c_data.extend(c0_data[h_offset:h_offset + self.hidden_size])
+                        b_state = (
+                            ResonantTensor(b_h_data, [self.num_layers, self.hidden_size], device=self.device),
+                            ResonantTensor(b_c_data, [self.num_layers, self.hidden_size], device=self.device),
+                        )
+                    else:
+                        b_state = state
+
+                b_out, (b_h, b_c) = self._forward_seq(b_tensor, b_state)
+                all_batch_outputs.extend(b_out.to_floats())
+                all_batch_h.append(b_h.to_floats())
+                all_batch_c.append(b_c.to_floats())
+
+            output = ResonantTensor(all_batch_outputs, [batch_size, seq_len, self.hidden_size], device=self.device)
+            h_data = []
+            c_data = []
+            for bh, bc in zip(all_batch_h, all_batch_c):
+                h_data.extend(bh)
+                c_data.extend(bc)
+            h_n = ResonantTensor(h_data, [batch_size, self.num_layers, self.hidden_size], device=self.device)
+            c_n = ResonantTensor(c_data, [batch_size, self.num_layers, self.hidden_size], device=self.device)
+            return output, (h_n, c_n)
+
+        return self._forward_seq(x, state)
+
+    def _forward_seq(
+        self,
+        x: ResonantTensor,
+        state: Optional[Tuple[ResonantTensor, ResonantTensor]] = None,
+    ) -> Tuple[ResonantTensor, Tuple[ResonantTensor, ResonantTensor]]:
+        """Process a single sequence (seq_len, input_size)."""
         seq_len = x.shape[0]
         layer_input_data = x.to_floats()
 

@@ -116,6 +116,145 @@ pub fn stack(tensors: &[&[f64]], shapes: &[&[usize]], dim: usize) -> (Vec<f64>, 
 }
 
 // =============================================================================
+// Convolution Operations
+// =============================================================================
+
+/// 1D Convolution
+///
+/// Input layout: [batch, length, in_channels] (NLC)
+/// Kernel layout: [out_channels, kernel_len, in_channels]
+/// Returns (output_data, [batch, out_len, out_channels])
+pub fn conv1d(
+    input: &[f64],
+    input_shape: &[usize; 3], // [batch, length, in_channels]
+    kernel: &[f64],
+    kernel_shape: &[usize; 3], // [out_channels, kernel_len, in_channels]
+    stride: usize,
+    padding: usize,
+) -> (Vec<f64>, [usize; 3]) {
+    let [batch, in_len, in_c] = *input_shape;
+    let [out_c, k_len, _] = *kernel_shape;
+
+    let out_len = (in_len + 2 * padding - k_len) / stride + 1;
+    let output_size = batch * out_len * out_c;
+    let mut output = vec![0.0f64; output_size];
+
+    for b in 0..batch {
+        for oc in 0..out_c {
+            for ol in 0..out_len {
+                let mut sum = 0.0;
+                for kl in 0..k_len {
+                    let il = (ol * stride + kl) as isize - padding as isize;
+                    if il >= 0 && il < in_len as isize {
+                        let il = il as usize;
+                        for ic in 0..in_c {
+                            let in_idx = b * (in_len * in_c) + il * in_c + ic;
+                            let k_idx = oc * (k_len * in_c) + kl * in_c + ic;
+                            if in_idx < input.len() && k_idx < kernel.len() {
+                                sum += input[in_idx] * kernel[k_idx];
+                            }
+                        }
+                    }
+                }
+                let out_idx = b * (out_len * out_c) + ol * out_c + oc;
+                output[out_idx] = sum;
+            }
+        }
+    }
+
+    (output, [batch, out_len, out_c])
+}
+
+/// Transposed 2D Convolution (Deconvolution)
+///
+/// Input layout: [batch, height, width, in_channels] (NHWC)
+/// Kernel layout: [in_channels, kernel_h, kernel_w, out_channels]
+/// Returns (output_data, [batch, out_h, out_w, out_channels])
+pub fn conv_transpose2d(
+    input: &[f64],
+    input_shape: &[usize; 4], // [batch, height, width, in_channels]
+    kernel: &[f64],
+    kernel_shape: &[usize; 4], // [in_channels, kernel_h, kernel_w, out_channels]
+    stride: (usize, usize),
+    padding: (usize, usize),
+) -> (Vec<f64>, [usize; 4]) {
+    let [batch, in_h, in_w, in_c] = *input_shape;
+    let [_, k_h, k_w, out_c] = *kernel_shape;
+
+    let out_h = (in_h - 1) * stride.0 + k_h - 2 * padding.0;
+    let out_w = (in_w - 1) * stride.1 + k_w - 2 * padding.1;
+
+    let output_size = batch * out_h * out_w * out_c;
+    let mut output = vec![0.0f64; output_size];
+
+    for b in 0..batch {
+        for ih in 0..in_h {
+            for iw in 0..in_w {
+                for ic in 0..in_c {
+                    let in_idx = b * (in_h * in_w * in_c) + ih * (in_w * in_c) + iw * in_c + ic;
+                    let in_val = input[in_idx];
+
+                    for kh in 0..k_h {
+                        for kw in 0..k_w {
+                            let oh = ih * stride.0 + kh;
+                            let ow = iw * stride.1 + kw;
+
+                            if oh >= padding.0 && ow >= padding.1 {
+                                let oh = oh - padding.0;
+                                let ow = ow - padding.1;
+
+                                if oh < out_h && ow < out_w {
+                                    for oc in 0..out_c {
+                                        let k_idx = ic * (k_h * k_w * out_c)
+                                            + kh * (k_w * out_c)
+                                            + kw * out_c
+                                            + oc;
+                                        let out_idx = b * (out_h * out_w * out_c)
+                                            + oh * (out_w * out_c)
+                                            + ow * out_c
+                                            + oc;
+                                        output[out_idx] += in_val * kernel[k_idx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (output, [batch, out_h, out_w, out_c])
+}
+
+/// Embedding lookup: output[i] = table[indices[i]]
+///
+/// table: [vocab_size, embed_dim], indices: [num_indices]
+/// Returns (output_data, [num_indices, embed_dim])
+pub fn embedding_lookup(
+    table: &[f64],
+    indices: &[usize],
+    vocab_size: usize,
+    embed_dim: usize,
+) -> (Vec<f64>, [usize; 2]) {
+    let n = indices.len();
+    let mut output = vec![0.0f64; n * embed_dim];
+
+    for i in 0..n {
+        let token_id = indices[i];
+        if token_id < vocab_size {
+            let src_off = token_id * embed_dim;
+            let dst_off = i * embed_dim;
+            for d in 0..embed_dim {
+                output[dst_off + d] = table[src_off + d];
+            }
+        }
+    }
+
+    (output, [n, embed_dim])
+}
+
+// =============================================================================
 // Activation Functions
 // =============================================================================
 

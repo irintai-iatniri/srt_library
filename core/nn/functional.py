@@ -395,6 +395,7 @@ __all__ = [
     "cat",
     "linear",
     "silu",
+    "golden_silu",
     "relu",
     "gelu",
     "sigmoid",

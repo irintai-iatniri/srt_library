@@ -609,6 +609,7 @@ pub fn py_einsum(equation: String, operands: Vec<Vec<f64>>, shapes: Vec<Vec<usiz
 
 /// Linear transformation: output = input @ weight^T + bias.
 #[pyfunction]
+#[pyo3(signature = (input, weight, bias, in_shape, w_shape))]
 pub fn py_linear(
     input: Vec<f64>,
     weight: Vec<f64>,
@@ -698,4 +699,72 @@ pub fn py_lstm_cell(
         &w_io, &w_ho, &b_o,
         batch, input_size, hidden_size,
     )
+}
+
+// =============================================================================
+// Conv1d, ConvTranspose2d, Embedding
+// =============================================================================
+
+/// 1D convolution.
+#[pyfunction]
+#[pyo3(signature = (input, input_shape, kernel, kernel_shape, stride=1, padding=0))]
+pub fn py_conv1d(
+    input: Vec<f64>,
+    input_shape: Vec<usize>,
+    kernel: Vec<f64>,
+    kernel_shape: Vec<usize>,
+    stride: usize,
+    padding: usize,
+) -> (Vec<f64>, Vec<usize>) {
+    let is: [usize; 3] = [input_shape[0], input_shape[1], input_shape[2]];
+    let ks: [usize; 3] = [kernel_shape[0], kernel_shape[1], kernel_shape[2]];
+    let (data, shape) = nn_ops::conv1d(&input, &is, &kernel, &ks, stride, padding);
+    (data, shape.to_vec())
+}
+
+/// Transposed 2D convolution.
+#[pyfunction]
+#[pyo3(signature = (input, input_shape, kernel, kernel_shape, stride_h=1, stride_w=1, pad_h=0, pad_w=0))]
+pub fn py_conv_transpose2d(
+    input: Vec<f64>,
+    input_shape: Vec<usize>,
+    kernel: Vec<f64>,
+    kernel_shape: Vec<usize>,
+    stride_h: usize,
+    stride_w: usize,
+    pad_h: usize,
+    pad_w: usize,
+) -> (Vec<f64>, Vec<usize>) {
+    let is: [usize; 4] = [input_shape[0], input_shape[1], input_shape[2], input_shape[3]];
+    let ks: [usize; 4] = [kernel_shape[0], kernel_shape[1], kernel_shape[2], kernel_shape[3]];
+    let (data, shape) = nn_ops::conv_transpose2d(&input, &is, &kernel, &ks, (stride_h, stride_w), (pad_h, pad_w));
+    (data, shape.to_vec())
+}
+
+/// Embedding lookup.
+#[pyfunction]
+pub fn py_embedding_lookup(
+    table: Vec<f64>,
+    indices: Vec<usize>,
+    vocab_size: usize,
+    embed_dim: usize,
+) -> (Vec<f64>, Vec<usize>) {
+    let (data, shape) = nn_ops::embedding_lookup(&table, &indices, vocab_size, embed_dim);
+    (data, shape.to_vec())
+}
+
+/// Nearest-neighbor upsampling (standalone).
+#[pyfunction]
+pub fn py_upsample_nearest(data: Vec<f64>, shape: Vec<usize>, scale: usize) -> (Vec<f64>, Vec<usize>) {
+    let s: [usize; 4] = [shape[0], shape[1], shape[2], shape[3]];
+    let (output, out_shape) = nn_ops::upsample_nearest(&data, &s, scale);
+    (output, out_shape.to_vec())
+}
+
+/// Bilinear upsampling (standalone).
+#[pyfunction]
+pub fn py_upsample_bilinear(data: Vec<f64>, shape: Vec<usize>, scale: usize) -> (Vec<f64>, Vec<usize>) {
+    let s: [usize; 4] = [shape[0], shape[1], shape[2], shape[3]];
+    let (output, out_shape) = nn_ops::upsample_bilinear(&data, &s, scale);
+    (output, out_shape.to_vec())
 }

@@ -432,3 +432,135 @@ void im2col_kernel(
         }
     }
 }
+
+// =============================================================================
+// 1D Convolution Kernel
+// =============================================================================
+
+/**
+ * 1D Convolution Kernel
+ *
+ * Input layout: [batch, length, in_channels] (NLC)
+ * Kernel layout: [out_channels, kernel_len, in_channels]
+ * Output layout: [batch, out_len, out_channels] (NLC)
+ *
+ * Each thread computes one output element.
+ */
+extern "C" __global__
+void conv1d_kernel(
+    const float* __restrict__ input,
+    const float* __restrict__ kernel,
+    const float* __restrict__ bias,
+    float* __restrict__ output,
+    int batch,
+    int in_len, int in_c,
+    int out_c,
+    int k_len,
+    int stride,
+    int pad,
+    int out_len
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * out_len * out_c;
+
+    if (idx >= total) return;
+
+    int oc = idx % out_c;
+    int ol = (idx / out_c) % out_len;
+    int b = idx / out_c / out_len;
+
+    float sum = 0.0f;
+
+    for (int kl = 0; kl < k_len; kl++) {
+        int il = ol * stride + kl - pad;
+
+        if (il >= 0 && il < in_len) {
+            for (int ic = 0; ic < in_c; ic++) {
+                // Input index: [b, il, ic]
+                int in_idx = b * (in_len * in_c) + il * in_c + ic;
+                // Kernel index: [oc, kl, ic]
+                int k_idx = oc * (k_len * in_c) + kl * in_c + ic;
+                sum += input[in_idx] * kernel[k_idx];
+            }
+        }
+    }
+
+    if (bias != nullptr) {
+        sum += bias[oc];
+    }
+
+    output[idx] = sum;
+}
+
+// =============================================================================
+// Transposed 2D Convolution Kernel
+// =============================================================================
+
+/**
+ * Transposed 2D Convolution (Deconvolution) Kernel
+ *
+ * Input layout: [batch, height, width, in_channels] (NHWC)
+ * Kernel layout: [in_channels, kernel_h, kernel_w, out_channels]
+ * Output layout: [batch, out_h, out_w, out_channels] (NHWC)
+ *
+ * Each thread computes one output element by gathering contributions
+ * from input positions that map to this output position.
+ */
+extern "C" __global__
+void conv_transpose2d_kernel(
+    const float* __restrict__ input,
+    const float* __restrict__ kernel,
+    const float* __restrict__ bias,
+    float* __restrict__ output,
+    int batch,
+    int in_h, int in_w, int in_c,
+    int out_c,
+    int k_h, int k_w,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w,
+    int out_h, int out_w
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * out_h * out_w * out_c;
+
+    if (idx >= total) return;
+
+    int oc = idx % out_c;
+    int ow = (idx / out_c) % out_w;
+    int oh = (idx / out_c / out_w) % out_h;
+    int b = idx / out_c / out_w / out_h;
+
+    float sum = 0.0f;
+
+    // For transposed conv, iterate over input positions and kernel offsets
+    // that contribute to this output position
+    for (int kh = 0; kh < k_h; kh++) {
+        for (int kw = 0; kw < k_w; kw++) {
+            // The input position that, with this kernel offset, maps here
+            int ih_num = oh + pad_h - kh;
+            int iw_num = ow + pad_w - kw;
+
+            // Must be exactly divisible by stride
+            if (ih_num % stride_h != 0 || iw_num % stride_w != 0) continue;
+
+            int ih = ih_num / stride_h;
+            int iw = iw_num / stride_w;
+
+            if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                for (int ic = 0; ic < in_c; ic++) {
+                    // Input index: [b, ih, iw, ic]
+                    int in_idx = b * (in_h * in_w * in_c) + ih * (in_w * in_c) + iw * in_c + ic;
+                    // Kernel index: [ic, kh, kw, oc]
+                    int k_idx = ic * (k_h * k_w * out_c) + kh * (k_w * out_c) + kw * out_c + oc;
+                    sum += input[in_idx] * kernel[k_idx];
+                }
+            }
+        }
+    }
+
+    if (bias != nullptr) {
+        sum += bias[oc];
+    }
+
+    output[idx] = sum;
+}
